@@ -7,6 +7,8 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.regex.Pattern;
 
 import org.apache.commons.io.IOUtils;
@@ -30,7 +32,9 @@ public class RedisLock {
 	static public Logger logger = LoggerFactory.getLogger(RedisLock.class);
 	
 	public static final String LOCK_NAME = "RedisLock_RefreshToken";
-	private static final Long RELEASE_SUCCESS = 1L;
+	private static final Long FAIL = 0L;
+	private static final Long SUCCESS = 1L;
+	private static final Long WRONG_OPA = 3L;
 	
 	private static final String LOCK = "lock";
 	
@@ -74,12 +78,13 @@ public class RedisLock {
 	}
 	
 	public static void main(String[] args) {
-		String requestId =Thread.currentThread().getName() + "-" + Thread.currentThread().getId();
-		boolean b = tryLock(jedisCluster, LOCK_NAME, requestId, 30000);
+		//String requestId =Thread.currentThread().getName() + "-" + Thread.currentThread().getId();
+		String requestId =UUID.randomUUID().toString();
+		boolean b = tryLock(jedisCluster, LOCK_NAME, requestId, 5000);
 		if(b) {
 			System.out.println("主线程成功获取锁");
 			System.out.println("主线程业务处理完成,开始释放锁!");
-	        boolean releaseDistributedLock = RedisLock.releaseLock(jedisCluster, LOCK_NAME, requestId);
+	        boolean releaseDistributedLock = RedisLock.releaseLock(jedisCluster, LOCK_NAME, requestId, 5000);
 	        if(releaseDistributedLock) {
 	        	 System.out.println("主线程释放锁成功");
 	        } else {
@@ -98,37 +103,75 @@ public class RedisLock {
      * @param expireTime 锁超期时间,毫秒
      * @return 是否获取成功
      */
-	public static synchronized boolean tryLock(JedisCluster jedisCluster, String lockKey, String requestId, int expireTime) {
+	public static boolean tryLock(JedisCluster jedisCluster, String lockKey, String requestId, int expireTime) {
+		long start = System.currentTimeMillis();
+		long end = start + expireTime;
+		boolean flag = false;
+		while(System.currentTimeMillis() <= end && !flag) {
+			flag = doTryLock(jedisCluster, lockKey, requestId);
+			if(flag) {
+				return flag;
+			} else {
+				try {
+					Thread.currentThread().sleep(100L);
+				} catch (InterruptedException e) {
+					logger.error("线程被打断",e);
+				}	
+			}
+		}
+		return flag;
+    }
+	
+	private static synchronized boolean doTryLock(JedisCluster jedisCluster, String lockKey, String requestId) {
 		ArrayList<String> keys = new ArrayList<String>();
 		keys.add(getHashKey(lockKey) + LOCK);
 		keys.add(getHashKey(lockKey) + lockKey);
 		Object result = jedisCluster.eval(luasrc, keys, Collections.singletonList(requestId));
 		System.out.println("返回:" + result);
-        if (RELEASE_SUCCESS.equals(result)) {
+        if (SUCCESS.equals(result)) {
             return true;
         }
         return false;
-		
     }
+	
 	
 	/**
      * 释放分布式锁
      * @param jedis Redis客户端
      * @param lockKey 锁
      * @param requestId 请求标识
+     * @param expireTime 锁超期时间,毫秒
      * @return 是否释放成功
      */
-    public static synchronized boolean releaseLock(JedisCluster jedisCluster, String lockKey, String requestId) {
+    public static  boolean releaseLock(JedisCluster jedisCluster, String lockKey, String requestId, int expireTime) {
+    	long start = System.currentTimeMillis();
+		long end = start + expireTime;
+		boolean flag = false;
+		while(System.currentTimeMillis() <= end && !flag) {
+			flag = doReleaseLock(jedisCluster, lockKey, requestId);
+			if(flag) {
+				return flag;
+			} else {
+				try {
+					Thread.currentThread().sleep(100L);
+				} catch (InterruptedException e) {
+					logger.error("线程被打断",e);
+				}	
+			}
+		}
+		return flag;
+    }
+    
+    public static synchronized boolean doReleaseLock(JedisCluster jedisCluster, String lockKey, String requestId) {
     	ArrayList<String> keys = new ArrayList<String>();
 		keys.add(getHashKey(lockKey) + UNLOCK);
 		keys.add(getHashKey(lockKey) + lockKey);
     	Object result = jedisCluster.eval(luasrc, keys, Collections.singletonList(requestId));
     	System.out.println("返回:" + result);
-    	if (RELEASE_SUCCESS.equals(result)) {
+    	if (SUCCESS.equals(result)) {
             return true;
         }
         return false;
-
     }
 	
 	private static String getHashKey(String lockKey) {
